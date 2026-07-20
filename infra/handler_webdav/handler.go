@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
@@ -9,23 +10,20 @@ import (
 	"fmt"
 	"log"
 	"mime"
-	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"path"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 )
-
-const allowedMethods = "OPTIONS, PROPFIND, HEAD, GET, PUT, DELETE, MKCOL"
 
 type application struct {
 	bucket          string
@@ -36,31 +34,6 @@ type application struct {
 
 	s3      *s3.Client
 	presign *s3.PresignClient
-}
-
-type statusResponseWriter struct {
-	http.ResponseWriter
-	status int
-	bytes  int64
-}
-
-func (writer *statusResponseWriter) WriteHeader(status int) {
-	if writer.status != 0 {
-		return
-	}
-
-	writer.status = status
-	writer.ResponseWriter.WriteHeader(status)
-}
-
-func (writer *statusResponseWriter) Write(body []byte) (int, error) {
-	if writer.status == 0 {
-		writer.status = http.StatusOK
-	}
-
-	written, err := writer.ResponseWriter.Write(body)
-	writer.bytes += int64(written)
-	return written, err
 }
 
 type multistatus struct {
@@ -126,11 +99,6 @@ func main() {
 		expiration = 300
 	}
 
-	address := strings.TrimSpace(os.Getenv("HTTP_ADDRESS"))
-	if address == "" {
-		address = ":8080"
-	}
-
 	client := s3.NewFromConfig(cfg)
 
 	app := &application{
@@ -143,132 +111,93 @@ func main() {
 		presign:         s3.NewPresignClient(client),
 	}
 
-	server := &http.Server{
-		Addr:              address,
-		Handler:           app,
-		ReadHeaderTimeout: 15 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-
-	shutdownCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	errCh := make(chan error, 1)
-	go func() {
-		log.Printf("webdav server listening address=%s prefix=/%s bucket=%s", address, prefix, bucket)
-		errCh <- server.ListenAndServe()
-	}()
-
-	select {
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("http server: %v", err)
-		}
-	case <-shutdownCtx.Done():
-		log.Printf("shutdown signal received")
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := server.Shutdown(ctx); err != nil {
-			log.Fatalf("graceful shutdown failed: %v", err)
-		}
-
-		log.Printf("shutdown complete")
-	}
+	lambda.Start(app.handle)
 }
 
-func (app *application) ServeHTTP(w http.ResponseWriter, request *http.Request) {
-	start := time.Now()
-	writer := &statusResponseWriter{ResponseWriter: w}
+func (app *application) handle(
+	ctx context.Context,
+	request events.APIGatewayV2HTTPRequest,
+) (events.APIGatewayV2HTTPResponse, error) {
+	method := strings.ToUpper(request.RequestContext.HTTP.Method)
+	rawPath := request.RawPath
 
-	app.handle(writer, request)
-
-	status := writer.status
-	if status == 0 {
-		status = http.StatusOK
+	if rawPath == "" {
+		rawPath = request.RequestContext.HTTP.Path
 	}
 
 	log.Printf(
-		"request method=%s path=%q status=%d duration=%s request_content_length=%d response_content_length=%d",
-		request.Method,
-		request.URL.EscapedPath(),
-		status,
-		time.Since(start),
-		request.ContentLength,
-		writer.bytes,
+		"request method=%s path=%q request_id=%q",
+		method,
+		rawPath,
+		request.RequestContext.RequestID,
 	)
-}
 
-func (app *application) handle(w http.ResponseWriter, request *http.Request) {
-	method := strings.ToUpper(request.Method)
-	rawPath := request.URL.EscapedPath()
-	if rawPath == "" {
-		rawPath = "/"
-	}
-
-	if !app.authorized(request.Header) {
-		writeResponse(request, w, http.StatusUnauthorized, map[string]string{
+	if !app.authorized(request.Headers) {
+		return response(401, map[string]string{
 			"WWW-Authenticate": `Basic realm="Zotero WebDAV", charset="UTF-8"`,
 			"Content-Type":     "text/plain; charset=utf-8",
-		}, "Authentication required.\n")
-		return
+		}, "Authentication required.\n"), nil
 	}
 
 	key, isCollection, err := app.resolvePath(rawPath)
 	if err != nil {
-		writeTextResponse(request, w, http.StatusBadRequest, "Invalid WebDAV path.\n")
-		return
+		return textResponse(400, "Invalid WebDAV path.\n"), nil
 	}
 
 	switch method {
-	case http.MethodOptions:
-		app.handleOptions(w, request)
+	case "OPTIONS":
+		return app.handleOptions(), nil
+
 	case "PROPFIND":
-		app.handlePropfind(w, request, key, isCollection)
-	case http.MethodHead:
-		app.handleHead(w, request, key, isCollection)
-	case http.MethodGet:
-		app.handleGet(w, request, key, isCollection)
-	case http.MethodPut:
-		app.handlePut(w, request, key, isCollection)
-	case http.MethodDelete:
-		app.handleDelete(w, request, key, isCollection)
+		return app.handlePropfind(ctx, request, key, isCollection)
+
+	case "HEAD":
+		return app.handleHead(ctx, key, isCollection)
+
+	case "GET":
+		return app.handleGet(ctx, key, isCollection)
+
+	case "PUT":
+		return app.handlePut(ctx, request, key, isCollection)
+
+	case "DELETE":
+		return app.handleDelete(ctx, key, isCollection)
+
 	case "MKCOL":
-		app.handleMkcol(w, request, key, isCollection)
+		return app.handleMkcol(ctx, key, isCollection)
+
 	default:
-		writeResponse(request, w, http.StatusMethodNotAllowed, map[string]string{
-			"Allow": allowedMethods,
+		return response(405, map[string]string{
+			"Allow": "OPTIONS, PROPFIND, HEAD, GET, PUT, DELETE, MKCOL",
 			"DAV":   "1",
-		}, "")
+		}, ""), nil
 	}
 }
 
-func (app *application) handleOptions(w http.ResponseWriter, request *http.Request) {
-	writeResponse(request, w, http.StatusOK, map[string]string{
-		"Allow":         allowedMethods,
-		"DAV":           "1",
-		"MS-Author-Via": "DAV",
+func (app *application) handleOptions() events.APIGatewayV2HTTPResponse {
+	return response(200, map[string]string{
+		"Allow":          "OPTIONS, PROPFIND, HEAD, GET, PUT, DELETE, MKCOL",
+		"DAV":            "1",
+		"MS-Author-Via":  "DAV",
+		"Content-Length": "0",
 	}, "")
 }
 
 func (app *application) handlePropfind(
-	w http.ResponseWriter,
-	request *http.Request,
+	ctx context.Context,
+	request events.APIGatewayV2HTTPRequest,
 	key string,
 	isCollection bool,
-) {
-	ctx := request.Context()
-	depth := strings.TrimSpace(getHeader(request.Header, "depth"))
+) (events.APIGatewayV2HTTPResponse, error) {
+	depth := strings.TrimSpace(getHeader(request.Headers, "depth"))
 	if depth == "" {
 		depth = "1"
 	}
 
 	if depth != "0" && depth != "1" {
-		writeResponse(request, w, http.StatusForbidden, map[string]string{
+		return response(403, map[string]string{
 			"Content-Type": "text/plain; charset=utf-8",
-		}, "Only Depth 0 and Depth 1 are supported.\n")
-		return
+		}, "Only Depth 0 and Depth 1 are supported.\n"), nil
 	}
 
 	var responses []davResponse
@@ -277,12 +206,10 @@ func (app *application) handlePropfind(
 		exists, err := app.collectionExists(ctx, key)
 		if err != nil {
 			log.Printf("PROPFIND collection check failed: %v", err)
-			writeServerError(request, w)
-			return
+			return serverError(), nil
 		}
 		if !exists {
-			writeTextResponse(request, w, http.StatusNotFound, "Collection not found.\n")
-			return
+			return textResponse(404, "Collection not found.\n"), nil
 		}
 
 		responses = append(responses, collectionDAVResponse(app.hrefForKey(key)))
@@ -291,8 +218,7 @@ func (app *application) handlePropfind(
 			children, err := app.listCollection(ctx, key)
 			if err != nil {
 				log.Printf("PROPFIND list failed: %v", err)
-				writeServerError(request, w)
-				return
+				return serverError(), nil
 			}
 			responses = append(responses, children...)
 		}
@@ -303,13 +229,11 @@ func (app *application) handlePropfind(
 		})
 		if err != nil {
 			if isNotFound(err) {
-				writeTextResponse(request, w, http.StatusNotFound, "Object not found.\n")
-				return
+				return textResponse(404, "Object not found.\n"), nil
 			}
 
 			log.Printf("PROPFIND HeadObject failed: %v", err)
-			writeServerError(request, w)
-			return
+			return serverError(), nil
 		}
 
 		responses = append(responses, objectDAVResponse(
@@ -330,43 +254,38 @@ func (app *application) handlePropfind(
 	body, err := xml.MarshalIndent(document, "", "  ")
 	if err != nil {
 		log.Printf("marshal PROPFIND XML: %v", err)
-		writeServerError(request, w)
-		return
+		return serverError(), nil
 	}
 
 	xmlBody := xml.Header + string(body) + "\n"
 
-	writeResponse(request, w, http.StatusMultiStatus, map[string]string{
-		"Content-Type": `application/xml; charset="utf-8"`,
-		"DAV":          "1",
-	}, xmlBody)
+	return response(207, map[string]string{
+		"Content-Type":   `application/xml; charset="utf-8"`,
+		"DAV":            "1",
+		"Content-Length": strconv.Itoa(len([]byte(xmlBody))),
+	}, xmlBody), nil
 }
 
 func (app *application) handleHead(
-	w http.ResponseWriter,
-	request *http.Request,
+	ctx context.Context,
 	key string,
 	isCollection bool,
-) {
-	ctx := request.Context()
-
+) (events.APIGatewayV2HTTPResponse, error) {
 	if isCollection {
 		exists, err := app.collectionExists(ctx, key)
 		if err != nil {
 			log.Printf("HEAD collection check failed: %v", err)
-			writeServerError(request, w)
-			return
+			return serverError(), nil
 		}
 		if !exists {
-			writeTextResponse(request, w, http.StatusNotFound, "")
-			return
+			return textResponse(404, ""), nil
 		}
 
-		writeResponse(request, w, http.StatusOK, map[string]string{
-			"Content-Type": "httpd/unix-directory",
-			"DAV":          "1",
-		}, "")
-		return
+		return response(200, map[string]string{
+			"Content-Type":   "httpd/unix-directory",
+			"Content-Length": "0",
+			"DAV":            "1",
+		}, ""), nil
 	}
 
 	head, err := app.s3.HeadObject(ctx, &s3.HeadObjectInput{
@@ -375,13 +294,11 @@ func (app *application) handleHead(
 	})
 	if err != nil {
 		if isNotFound(err) {
-			writeTextResponse(request, w, http.StatusNotFound, "")
-			return
+			return textResponse(404, ""), nil
 		}
 
 		log.Printf("HEAD HeadObject failed: %v", err)
-		writeServerError(request, w)
-		return
+		return serverError(), nil
 	}
 
 	headers := map[string]string{
@@ -398,23 +315,19 @@ func (app *application) handleHead(
 	}
 
 	if head.LastModified != nil {
-		headers["Last-Modified"] = head.LastModified.UTC().Format(http.TimeFormat)
+		headers["Last-Modified"] = head.LastModified.UTC().Format(time.RFC1123)
 	}
 
-	writeResponse(request, w, http.StatusOK, headers, "")
+	return response(200, headers, ""), nil
 }
 
 func (app *application) handleGet(
-	w http.ResponseWriter,
-	request *http.Request,
+	ctx context.Context,
 	key string,
 	isCollection bool,
-) {
-	ctx := request.Context()
-
+) (events.APIGatewayV2HTTPResponse, error) {
 	if isCollection {
-		writeTextResponse(request, w, http.StatusMethodNotAllowed, "Collections cannot be downloaded.\n")
-		return
+		return textResponse(405, "Collections cannot be downloaded.\n"), nil
 	}
 
 	_, err := app.s3.HeadObject(ctx, &s3.HeadObjectInput{
@@ -423,13 +336,11 @@ func (app *application) handleGet(
 	})
 	if err != nil {
 		if isNotFound(err) {
-			writeTextResponse(request, w, http.StatusNotFound, "Object not found.\n")
-			return
+			return textResponse(404, "Object not found.\n"), nil
 		}
 
 		log.Printf("GET HeadObject failed: %v", err)
-		writeServerError(request, w)
-		return
+		return serverError(), nil
 	}
 
 	presigned, err := app.presign.PresignGetObject(
@@ -444,33 +355,34 @@ func (app *application) handleGet(
 	)
 	if err != nil {
 		log.Printf("presign GET failed: %v", err)
-		writeServerError(request, w)
-		return
+		return serverError(), nil
 	}
 
-	writeResponse(request, w, http.StatusTemporaryRedirect, map[string]string{
+	return response(307, map[string]string{
 		"Location":      presigned.URL,
 		"Cache-Control": "no-store",
 		"Content-Type":  "text/plain; charset=utf-8",
-	}, "Temporary redirect.\n")
+	}, "Temporary redirect.\n"), nil
 }
 
 func (app *application) handlePut(
-	w http.ResponseWriter,
-	request *http.Request,
+	ctx context.Context,
+	request events.APIGatewayV2HTTPRequest,
 	key string,
 	isCollection bool,
-) {
-	ctx := request.Context()
-
+) (events.APIGatewayV2HTTPResponse, error) {
 	if isCollection || key == app.rootKey() {
-		writeTextResponse(request, w, http.StatusConflict, "PUT requires an object path.\n")
-		return
+		return textResponse(409, "PUT requires an object path.\n"), nil
+	}
+
+	body, err := requestBody(request)
+	if err != nil {
+		return textResponse(400, "Invalid request body.\n"), nil
 	}
 
 	existed := true
 
-	_, err := app.s3.HeadObject(ctx, &s3.HeadObjectInput{
+	_, err = app.s3.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(app.bucket),
 		Key:    aws.String(key),
 	})
@@ -479,12 +391,11 @@ func (app *application) handlePut(
 			existed = false
 		} else {
 			log.Printf("PUT existence check failed: %v", err)
-			writeServerError(request, w)
-			return
+			return serverError(), nil
 		}
 	}
 
-	contentType := strings.TrimSpace(getHeader(request.Header, "content-type"))
+	contentType := strings.TrimSpace(getHeader(request.Headers, "content-type"))
 	if contentType == "" {
 		contentType = mime.TypeByExtension(path.Ext(key))
 	}
@@ -495,48 +406,44 @@ func (app *application) handlePut(
 	_, err = app.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(app.bucket),
 		Key:           aws.String(key),
-		Body:          request.Body,
-		ContentLength: aws.Int64(request.ContentLength),
+		Body:          bytes.NewReader(body),
+		ContentLength: aws.Int64(int64(len(body))),
 		ContentType:   aws.String(contentType),
 	})
 	if err != nil {
 		log.Printf("PUT PutObject failed: %v", err)
-		writeServerError(request, w)
-		return
+		return serverError(), nil
 	}
 
 	if existed {
-		writeResponse(request, w, http.StatusNoContent, nil, "")
-		return
+		return response(204, map[string]string{
+			"Content-Length": "0",
+		}, ""), nil
 	}
 
-	writeResponse(request, w, http.StatusCreated, nil, "")
+	return response(201, map[string]string{
+		"Content-Length": "0",
+	}, ""), nil
 }
 
 func (app *application) handleDelete(
-	w http.ResponseWriter,
-	request *http.Request,
+	ctx context.Context,
 	key string,
 	isCollection bool,
-) {
-	ctx := request.Context()
-
+) (events.APIGatewayV2HTTPResponse, error) {
 	if key == app.rootKey() {
-		writeTextResponse(request, w, http.StatusForbidden, "The Zotero root collection cannot be deleted.\n")
-		return
+		return textResponse(403, "The Zotero root collection cannot be deleted.\n"), nil
 	}
 
 	if isCollection {
 		children, err := app.listKeys(ctx, key)
 		if err != nil {
 			log.Printf("DELETE list collection failed: %v", err)
-			writeServerError(request, w)
-			return
+			return serverError(), nil
 		}
 
 		if len(children) == 0 {
-			writeTextResponse(request, w, http.StatusNotFound, "Collection not found.\n")
-			return
+			return textResponse(404, "Collection not found.\n"), nil
 		}
 
 		for _, childKey := range children {
@@ -546,13 +453,13 @@ func (app *application) handleDelete(
 			})
 			if err != nil {
 				log.Printf("DELETE child object failed key=%q: %v", childKey, err)
-				writeServerError(request, w)
-				return
+				return serverError(), nil
 			}
 		}
 
-		writeResponse(request, w, http.StatusNoContent, nil, "")
-		return
+		return response(204, map[string]string{
+			"Content-Length": "0",
+		}, ""), nil
 	}
 
 	_, err := app.s3.HeadObject(ctx, &s3.HeadObjectInput{
@@ -561,13 +468,11 @@ func (app *application) handleDelete(
 	})
 	if err != nil {
 		if isNotFound(err) {
-			writeTextResponse(request, w, http.StatusNotFound, "Object not found.\n")
-			return
+			return textResponse(404, "Object not found.\n"), nil
 		}
 
 		log.Printf("DELETE HeadObject failed: %v", err)
-		writeServerError(request, w)
-		return
+		return serverError(), nil
 	}
 
 	_, err = app.s3.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -576,21 +481,19 @@ func (app *application) handleDelete(
 	})
 	if err != nil {
 		log.Printf("DELETE DeleteObject failed: %v", err)
-		writeServerError(request, w)
-		return
+		return serverError(), nil
 	}
 
-	writeResponse(request, w, http.StatusNoContent, nil, "")
+	return response(204, map[string]string{
+		"Content-Length": "0",
+	}, ""), nil
 }
 
 func (app *application) handleMkcol(
-	w http.ResponseWriter,
-	request *http.Request,
+	ctx context.Context,
 	key string,
 	isCollection bool,
-) {
-	ctx := request.Context()
-
+) (events.APIGatewayV2HTTPResponse, error) {
 	if !isCollection {
 		key += "/"
 	}
@@ -598,31 +501,30 @@ func (app *application) handleMkcol(
 	exists, err := app.collectionExists(ctx, key)
 	if err != nil {
 		log.Printf("MKCOL collection check failed: %v", err)
-		writeServerError(request, w)
-		return
+		return serverError(), nil
 	}
 	if exists {
-		writeTextResponse(request, w, http.StatusMethodNotAllowed, "Collection already exists.\n")
-		return
+		return textResponse(405, "Collection already exists.\n"), nil
 	}
 
 	_, err = app.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(app.bucket),
 		Key:           aws.String(key),
-		Body:          http.NoBody,
+		Body:          bytes.NewReader(nil),
 		ContentLength: aws.Int64(0),
 		ContentType:   aws.String("application/x-directory"),
 	})
 	if err != nil {
 		log.Printf("MKCOL PutObject failed: %v", err)
-		writeServerError(request, w)
-		return
+		return serverError(), nil
 	}
 
-	writeResponse(request, w, http.StatusCreated, nil, "")
+	return response(201, map[string]string{
+		"Content-Length": "0",
+	}, ""), nil
 }
 
-func (app *application) authorized(headers http.Header) bool {
+func (app *application) authorized(headers map[string]string) bool {
 	header := strings.TrimSpace(getHeader(headers, "authorization"))
 	if header == "" {
 		return false
@@ -860,7 +762,7 @@ func objectDAVResponse(
 	var created string
 
 	if lastModified != nil {
-		modified = lastModified.UTC().Format(http.TimeFormat)
+		modified = lastModified.UTC().Format(time.RFC1123)
 		created = lastModified.UTC().Format(time.RFC3339)
 	}
 
@@ -881,17 +783,23 @@ func objectDAVResponse(
 	}
 }
 
-func getHeader(headers http.Header, wanted string) string {
-	for name, values := range headers {
-		if !strings.EqualFold(name, wanted) {
-			continue
-		}
+func requestBody(request events.APIGatewayV2HTTPRequest) ([]byte, error) {
+	if request.Body == "" {
+		return []byte{}, nil
+	}
 
-		if len(values) == 0 {
-			return ""
-		}
+	if request.IsBase64Encoded {
+		return base64.StdEncoding.DecodeString(request.Body)
+	}
 
-		return values[0]
+	return []byte(request.Body), nil
+}
+
+func getHeader(headers map[string]string, wanted string) string {
+	for name, value := range headers {
+		if strings.EqualFold(name, wanted) {
+			return value
+		}
 	}
 
 	return ""
@@ -925,48 +833,39 @@ func envInt(name string, fallback int) int {
 	return parsed
 }
 
-func writeResponse(
-	request *http.Request,
-	w http.ResponseWriter,
+func response(
 	status int,
 	headers map[string]string,
 	body string,
-) {
-	for name, value := range headers {
-		w.Header().Set(name, value)
+) events.APIGatewayV2HTTPResponse {
+	if headers == nil {
+		headers = make(map[string]string)
 	}
 
-	if w.Header().Get("Content-Length") == "" {
-		w.Header().Set("Content-Length", strconv.Itoa(len([]byte(body))))
+	if _, exists := headers["Content-Length"]; !exists {
+		headers["Content-Length"] = strconv.Itoa(len([]byte(body)))
 	}
 
-	w.WriteHeader(status)
-
-	if request.Method == http.MethodHead || body == "" {
-		return
-	}
-
-	if _, err := w.Write([]byte(body)); err != nil {
-		log.Printf("write response body failed: %v", err)
+	return events.APIGatewayV2HTTPResponse{
+		StatusCode:      status,
+		Headers:         headers,
+		Body:            body,
+		IsBase64Encoded: false,
 	}
 }
 
-func writeTextResponse(
-	request *http.Request,
-	w http.ResponseWriter,
+func textResponse(
 	status int,
 	body string,
-) {
-	writeResponse(request, w, status, map[string]string{
+) events.APIGatewayV2HTTPResponse {
+	return response(status, map[string]string{
 		"Content-Type": "text/plain; charset=utf-8",
 	}, body)
 }
 
-func writeServerError(request *http.Request, w http.ResponseWriter) {
-	writeTextResponse(
-		request,
-		w,
-		http.StatusInternalServerError,
+func serverError() events.APIGatewayV2HTTPResponse {
+	return textResponse(
+		500,
 		fmt.Sprintf("Internal WebDAV server error at %s.\n", time.Now().UTC().Format(time.RFC3339)),
 	)
 }
