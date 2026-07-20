@@ -1,0 +1,97 @@
+.DS_Store
+# ===============================
+# Terraform
+# ===============================
+
+# Diretórios e arquivos de estado
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.backup
+
+# Arquivos de plano
+*.tfplan
+*.tfplan.*
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Arquivos locais de variáveis (NUNCA versionar)
+*.tfvars
+*.tfvars.json
+
+# Lock file (opcional)
+# 👉 Se usar Terraform Cloud, pode versionar ou não
+# terraform.lock.hcl
+
+# ===============================
+# Secrets / credenciais
+# ===============================
+
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ===============================
+# AWS / Cloud
+# ===============================
+
+.aws/
+aws-credentials*
+aws-config*
+
+# ===============================
+# Logs
+# ===============================
+
+*.log
+logs/
+tmp/
+
+# ===============================
+# OS / Editor
+# ===============================
+
+.DS_Store
+Thumbs.db
+
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json
+
+.idea/
+*.iml
+
+# ===============================
+# Node / Python (se tiver lambdas)
+# ===============================
+
+node_modules/
+dist/
+build/
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# ===============================
+# Misc
+# ===============================
+
+*.swp
+*.swo
+*~infra/build/

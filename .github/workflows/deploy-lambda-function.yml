@@ -1,0 +1,118 @@
+name: Deploy WebDAV Lambda
+
+on:
+  push:
+    branches:
+      - prod
+    paths:
+      - "infra/handler_webdav/**"
+      - ".github/workflows/deploy-lambda-function.yml"
+
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  LAMBDA_NAME: webdav-server-prod-handler
+  HANDLER_DIR: infra/handler_webdav
+
+jobs:
+  deploy:
+    name: Build and deploy WebDAV
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_LAMBDA_ROLE_TO_ASSUME_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-webdav-lambda-deploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: infra/handler_webdav/go.mod
+          cache: true
+          cache-dependency-path: infra/handler_webdav/go.sum
+
+      - name: Download and verify dependencies
+        working-directory: ${{ env.HANDLER_DIR }}
+        run: |
+          set -euo pipefail
+
+          go mod download
+          go mod verify
+
+      - name: Test handler
+        working-directory: ${{ env.HANDLER_DIR }}
+        run: |
+          set -euo pipefail
+
+          go test ./...
+
+      - name: Build Lambda bootstrap
+        working-directory: ${{ env.HANDLER_DIR }}
+        env:
+          GOOS: linux
+          GOARCH: arm64
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+
+          rm -rf dist
+          mkdir -p dist
+
+          go build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o dist/bootstrap \
+            .
+
+          chmod +x dist/bootstrap
+          file dist/bootstrap
+
+      - name: Package Lambda
+        working-directory: ${{ env.HANDLER_DIR }}
+        run: |
+          set -euo pipefail
+
+          cd dist
+          zip -j webdav-handler.zip bootstrap
+          unzip -l webdav-handler.zip
+
+      - name: Deploy Lambda
+        working-directory: ${{ env.HANDLER_DIR }}
+        run: |
+          set -euo pipefail
+
+          aws lambda update-function-code \
+            --region "${AWS_REGION}" \
+            --function-name "${LAMBDA_NAME}" \
+            --zip-file fileb://dist/webdav-handler.zip
+
+          aws lambda wait function-updated \
+            --region "${AWS_REGION}" \
+            --function-name "${LAMBDA_NAME}"
+
+      - name: Confirm deployed function
+        run: |
+          set -euo pipefail
+
+          aws lambda get-function-configuration \
+            --region "${AWS_REGION}" \
+            --function-name "${LAMBDA_NAME}" \
+            --query '{
+              FunctionName:FunctionName,
+              Runtime:Runtime,
+              Architecture:Architectures[0],
+              LastModified:LastModified,
+              State:State,
+              LastUpdateStatus:LastUpdateStatus
+            }'
