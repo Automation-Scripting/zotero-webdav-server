@@ -46,7 +46,7 @@ variable "presigned_put_expiration_seconds" {
 variable "lambda_memory_size" {
   description = "Memory allocated to the WebDAV Lambda."
   type        = number
-  default     = 256
+  default     = 128
 }
 
 variable "lambda_timeout_seconds" {
