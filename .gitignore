@@ -98,3 +98,7 @@ venv/
 
 # Cloudflare local runtime cache
 .wrangler/
+
+# Binários locais do server_webdav
+infra/server_webdav/bootstrap
+infra/server_webdav/handler_webdav
