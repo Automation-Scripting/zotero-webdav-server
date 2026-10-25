@@ -146,6 +146,7 @@ func main() {
 	server := &http.Server{
 		Addr:              address,
 		Handler:           app,
+		ReadTimeout:       0,
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -190,8 +191,9 @@ func (app *application) ServeHTTP(w http.ResponseWriter, request *http.Request) 
 	}
 
 	log.Printf(
-		"request method=%s path=%q status=%d duration=%s request_content_length=%d response_content_length=%d",
+		"method=%s remote=%s path=%q status=%d duration=%s request_bytes=%d response_bytes=%d",
 		request.Method,
+		request.RemoteAddr,
 		request.URL.EscapedPath(),
 		status,
 		time.Since(start),
@@ -492,13 +494,18 @@ func (app *application) handlePut(
 		contentType = "application/octet-stream"
 	}
 
-	_, err = app.s3.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:        aws.String(app.bucket),
-		Key:           aws.String(key),
-		Body:          request.Body,
-		ContentLength: aws.Int64(request.ContentLength),
-		ContentType:   aws.String(contentType),
-	})
+	input := &s3.PutObjectInput{
+		Bucket:      aws.String(app.bucket),
+		Key:         aws.String(key),
+		Body:        request.Body,
+		ContentType: aws.String(contentType),
+	}
+
+	if request.ContentLength >= 0 {
+		input.ContentLength = aws.Int64(request.ContentLength)
+	}
+
+	_, err = app.s3.PutObject(ctx, input)
 	if err != nil {
 		log.Printf("PUT PutObject failed: %v", err)
 		writeServerError(request, w)

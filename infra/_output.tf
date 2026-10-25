@@ -17,3 +17,8 @@ output "webdav_lambda_name" {
 output "aws_lambda_github_role_arn" {
   value = aws_iam_role.github_webdav_deployer.arn
 }
+
+output "zotero_worker_base_url" {
+  description = "Configure this base URL in Zotero; Zotero appends /zotero/."
+  value       = "https://${cloudflare_workers_script.webdav.script_name}.${var.cloudflare_workers_subdomain}.workers.dev"
+}

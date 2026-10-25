@@ -1,0 +1,22 @@
+[
+  {
+    "name": "payload-1.zip",
+    "bytes": 1048700,
+    "sha256": "442688435cac69011145410a907e7daacc38fb3cbb884ad3af5596a9616f614e"
+  },
+  {
+    "name": "payload-7.zip",
+    "bytes": 7340156,
+    "sha256": "e935c4b1f606324cd7a52390ff8b1783f06fbd586bcdcf8c0e479d996b5b263b"
+  },
+  {
+    "name": "payload-12.zip",
+    "bytes": 12583036,
+    "sha256": "80f5c3acb889332adf9b235acf18265b8bbd61fa1714bf97e68e404c41c29e26"
+  },
+  {
+    "name": "payload-32.zip",
+    "bytes": 33554556,
+    "sha256": "1567556997aa6788a1a3a98a5b71e44c3ed5fb27bc3a9d985d40543ddaaea760"
+  }
+]

@@ -43,9 +43,10 @@ resource "aws_lambda_function" "webdav" {
     variables = {
       LIBRARY_BUCKET = aws_s3_bucket.library.id
 
-      WEBDAV_PREFIX   = "zotero"
-      WEBDAV_USERNAME = var.webdav_username
-      WEBDAV_PASSWORD = var.webdav_password
+      WEBDAV_PREFIX       = "zotero"
+      WEBDAV_USERNAME     = var.webdav_username
+      WEBDAV_PASSWORD     = var.webdav_password
+      WEBDAV_WORKER_TOKEN = var.webdav_worker_token
 
       PRESIGNED_GET_EXPIRATION = tostring(var.presigned_get_expiration_seconds)
       PRESIGNED_PUT_EXPIRATION = tostring(var.presigned_put_expiration_seconds)

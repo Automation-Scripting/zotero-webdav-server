@@ -1,0 +1,10 @@
+{
+  "version": "10.0.6",
+  "build": "20261007113827",
+  "gecko": "140",
+  "source": "/Applications/Zotero.app/Contents/Resources/app/omni.ja",
+  "files": {
+    "webdav.js": "a7f5abf7196f662959a86003d008937ca18a11befa3dcb9fe6cec78e55dce9a4",
+    "http.js": "7434dc58d8af897263d4cd8d282bd033aa3e1c1fa502c7b00c48e3a7567aa8b9"
+  }
+}

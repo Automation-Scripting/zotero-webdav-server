@@ -23,7 +23,7 @@ resource "aws_s3_bucket_versioning" "library" {
   bucket = aws_s3_bucket.library.id
 
   versioning_configuration {
-    status = "Enabled"
+    status = "Suspended"
   }
 }
 

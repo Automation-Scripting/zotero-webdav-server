@@ -26,11 +26,13 @@ import (
 )
 
 type application struct {
-	bucket          string
-	prefix          string
-	username        string
-	password        string
-	presignLifetime time.Duration
+	bucket             string
+	prefix             string
+	username           string
+	password           string
+	presignLifetime    time.Duration
+	putPresignLifetime time.Duration
+	workerToken        string
 
 	s3      *s3.Client
 	presign *s3.PresignClient
@@ -99,16 +101,23 @@ func main() {
 		expiration = 300
 	}
 
+	putExpiration := envInt("PRESIGNED_PUT_EXPIRATION", 120)
+	if putExpiration < 1 || putExpiration > 300 {
+		putExpiration = 120
+	}
+
 	client := s3.NewFromConfig(cfg)
 
 	app := &application{
-		bucket:          bucket,
-		prefix:          prefix,
-		username:        username,
-		password:        password,
-		presignLifetime: time.Duration(expiration) * time.Second,
-		s3:              client,
-		presign:         s3.NewPresignClient(client),
+		bucket:             bucket,
+		prefix:             prefix,
+		username:           username,
+		password:           password,
+		presignLifetime:    time.Duration(expiration) * time.Second,
+		putPresignLifetime: time.Duration(putExpiration) * time.Second,
+		workerToken:        os.Getenv("WEBDAV_WORKER_TOKEN"),
+		s3:                 client,
+		presign:            s3.NewPresignClient(client),
 	}
 
 	lambda.Start(app.handle)
@@ -137,6 +146,11 @@ func (app *application) handle(
 			"WWW-Authenticate": `Basic realm="Zotero WebDAV", charset="UTF-8"`,
 			"Content-Type":     "text/plain; charset=utf-8",
 		}, "Authentication required.\n"), nil
+	}
+
+	// The bridge accepts only small metadata, never the original upload body.
+	if rawPath == "/_worker/upload" || rawPath == "/_worker/dav" {
+		return app.handleWorkerBridge(ctx, request, rawPath)
 	}
 
 	key, isCollection, err := app.resolvePath(rawPath)
