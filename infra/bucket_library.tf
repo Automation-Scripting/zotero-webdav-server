@@ -1,5 +1,5 @@
 resource "aws_s3_bucket" "library" {
-  bucket = "${local.project_full_name}-library"
+  bucket = "webdav-server-prod-library"
 }
 
 resource "aws_s3_bucket_public_access_block" "library" {

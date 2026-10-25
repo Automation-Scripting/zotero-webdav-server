@@ -3,7 +3,7 @@ terraform {
     organization = "Graduate-APPs-USP"
 
     workspaces {
-      name = "webdav-server"
+      name = "zotero-webdav-server"
     }
   }
 

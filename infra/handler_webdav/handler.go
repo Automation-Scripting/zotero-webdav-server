@@ -883,4 +883,3 @@ func serverError() events.APIGatewayV2HTTPResponse {
 		fmt.Sprintf("Internal WebDAV server error at %s.\n", time.Now().UTC().Format(time.RFC3339)),
 	)
 }
-

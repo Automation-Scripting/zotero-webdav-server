@@ -1,6 +1,6 @@
 variable "project_name" {
   type    = string
-  default = "webdav-server"
+  default = "zotero-webdav-server"
 }
 
 variable "env" {
