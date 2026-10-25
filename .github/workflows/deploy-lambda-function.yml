@@ -16,7 +16,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-2
-  LAMBDA_NAME: webdav-server-prod-handler
+  LAMBDA_NAME: zotero-webdav-server-prod-handler
   HANDLER_DIR: infra/handler_webdav
 
 jobs:
